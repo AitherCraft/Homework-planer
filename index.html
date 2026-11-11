@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Period Planner</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap">
@@ -39,7 +44,9 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
+  margin: 0;
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-body);
@@ -129,6 +136,16 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
 
 .donebar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 22px; }
 
+.acct { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.acct-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; font-size: 14px; }
+.acct-row span { min-width: 0; overflow-wrap: anywhere; }
+.authform { display: flex; flex-wrap: wrap; gap: 8px; }
+.authform > * { min-width: 0; }
+.authform .field { flex: 1 1 200px; }
+.authform .ghost { height: 44px; }
+.authmsg { margin: 0; font-size: 13.5px; color: var(--muted); }
+.authmsg:empty { display: none; }
+.authmsg.bad { color: var(--danger); }
 .foot { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
 
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); max-width: calc(100% - 32px); background: var(--fg); color: var(--bg); padding: 10px 10px 10px 16px; border-radius: 12px; display: flex; align-items: center; gap: 12px; font-size: 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.25); z-index: 20; }
@@ -136,6 +153,8 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
+</head>
+<body>
 
 <div class="wrap">
   <header class="top">
@@ -143,6 +162,17 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
     <div class="today" id="today"></div>
     <div class="stats" id="stats" aria-live="polite"></div>
   </header>
+
+  <section class="acct" id="acct" hidden>
+    <div class="acct-row"><span id="acctmsg"></span><button class="ghost" type="button" id="acctbtn"></button></div>
+    <form class="authform" id="authform" hidden>
+      <input class="field" id="email" type="email" autocomplete="email" placeholder="Email" aria-label="Email" required>
+      <input class="field" id="password" type="password" autocomplete="current-password" placeholder="Password (6+ characters)" aria-label="Password" minlength="6" required>
+      <button class="btn" type="submit" id="signin">Sign in</button>
+      <button class="ghost" type="button" id="signup">Create account</button>
+    </form>
+    <p class="authmsg" id="authmsg" role="status"></p>
+  </section>
 
   <form class="add" id="add" autocomplete="off">
     <input class="field" id="title" type="text" maxlength="140" placeholder="What's due? e.g. Chapter 4 questions" aria-label="Homework">
@@ -160,8 +190,12 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
 
 <div class="toast" id="toast" hidden><span id="toastmsg"></span><button type="button" id="undo">Undo</button></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function () {
+  /* Accounts: paste your Supabase project URL and public (anon) key here. Leave empty to run without accounts. */
+  var SUPABASE_URL = "", SUPABASE_KEY = "";
+
   var LS = "hw-planner-v1", LSV = "hw-planner-view";
   var DEFAULT_CLASSES = ["Period 1", "Period 2", "Period 3", "Period 4", "Period 5", "Period 6", "Period 7", "Period 8"];
   var OLD_DEFAULTS = ["Math", "English", "Science", "Social Studies", "Spanish", "PE", "Art", "Technology"];
@@ -243,7 +277,11 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
   /* saving: this device always, your account when connected */
   var docRef = null, writeTimer = null, writing = false, dirty = false, synced = false;
   function setStatus() {
-    $("status").textContent = synced ? "Saved to your Claude account. Open this page on any device where you're signed in." : (window.claude ? "Saved on this device only. Sign in to Claude to save it to your account." : "Saved in this browser on this device.");
+    var t;
+    if (sb) t = sbUser ? (synced ? "Saved to your account. Sign in on any device to see it." : "Can't reach your account right now. Your homework is saved in this browser.") : "Saved in this browser only. Sign in to save it to your account.";
+    else if (synced) t = "Saved to your Claude account. Open this page on any device where you're signed in.";
+    else t = window.claude ? "Saved on this device only. Sign in to Claude to save it to your account." : "Saved in this browser on this device.";
+    $("status").textContent = t;
   }
   function save() {
     state.updated = Date.now();
@@ -284,6 +322,77 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
         }, function () { synced = false; setStatus(); });
       });
     }).catch(function () {});
+  }
+
+  /* accounts (Supabase) */
+  var sb = null, sbUser = null;
+  function renderAcct() {
+    $("acctmsg").textContent = sbUser ? "Signed in as " + sbUser.email : "You're not signed in.";
+    $("acctbtn").textContent = sbUser ? "Sign out" : ($("authform").hidden ? "Sign in or create account" : "Cancel");
+    if (sbUser) $("authform").hidden = true;
+  }
+  function authMsg(t, bad) { var m = $("authmsg"); m.textContent = t; m.className = "authmsg" + (bad ? " bad" : ""); }
+  function startAccountSync(u) {
+    docRef = {
+      set: function (d) {
+        return sb.from("planners").upsert({ user_id: u.id, data: { classes: d.classes, tasks: d.tasks }, updated: d.updated }, { onConflict: "user_id" })
+          .then(function (r) { if (r.error) throw r.error; });
+      }
+    };
+    sb.from("planners").select("data,updated").eq("user_id", u.id).maybeSingle().then(function (r) {
+      if (r.error) { synced = false; setStatus(); return; }
+      var row = r.data;
+      if (row && row.data && row.updated > (state.updated || 0)) {
+        var d = JSON.parse(JSON.stringify(row.data)); d.updated = row.updated;
+        if (valid(d)) { state = migrate(d); lsSet(LS, JSON.stringify(state)); fixView(); renderAll(); renderOptions(); }
+        synced = true;
+      } else if (state.updated) {
+        dirty = true; flush();
+      } else {
+        synced = true;
+      }
+      setStatus();
+    });
+  }
+  function connectSupabase() {
+    if (!SUPABASE_URL || !SUPABASE_KEY || !window.supabase) return;
+    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    $("acct").hidden = false;
+    $("acctbtn").addEventListener("click", function () {
+      if (sbUser) { sb.auth.signOut(); return; }
+      $("authform").hidden = !$("authform").hidden; authMsg(""); renderAcct();
+      if (!$("authform").hidden) $("email").focus();
+    });
+    $("authform").addEventListener("submit", function (e) {
+      e.preventDefault(); authMsg("Signing in…");
+      sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("password").value }).then(function (r) {
+        if (r.error) { authMsg(r.error.message, true); return; }
+        authMsg(""); $("password").value = "";
+      });
+    });
+    $("signup").addEventListener("click", function () {
+      if (!$("authform").reportValidity()) return;
+      authMsg("Creating account…");
+      sb.auth.signUp({ email: $("email").value.trim(), password: $("password").value }).then(function (r) {
+        if (r.error) { authMsg(r.error.message, true); return; }
+        $("password").value = "";
+        authMsg(r.data && r.data.session ? "" : "Account created. Check your email for a confirmation link, then sign in.");
+      });
+    });
+    sb.auth.onAuthStateChange(function (event, session) {
+      var u = session && session.user ? session.user : null;
+      if (u && sbUser && u.id === sbUser.id) { sbUser = u; return; }
+      var prev = sbUser; sbUser = u;
+      setTimeout(function () {
+        if (u) { startAccountSync(u); }
+        else {
+          docRef = null; synced = false;
+          if (prev) { state = fresh(); lsSet(LS, JSON.stringify(state)); view = "all"; lsSet(LSV, view); renderAll(); renderOptions(); }
+        }
+        renderAcct(); setStatus();
+      }, 0);
+    });
+    renderAcct();
   }
 
   /* actions */
@@ -432,7 +541,10 @@ li.task { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1
   renderOptions();
   if (view !== "all") $("cls").value = view;
   renderAll();
+  connectSupabase();
   setStatus();
   connect();
 })();
 </script>
+</body>
+</html>
